@@ -1,0 +1,138 @@
+--- lerobot/datasets/lerobot_dataset.py	2026-02-27 18:07:18.000000000 +0000
++++ lerobot/datasets/lerobot_dataset.py	2026-04-03 07:39:56.695893215 +0000
+@@ -767,6 +767,11 @@
+             check_delta_timestamps(self.delta_timestamps, self.fps, self.tolerance_s)
+             self.delta_indices = get_delta_indices(self.delta_timestamps, self.fps)
+ 
++        # Eagerly load numpy cache + shared-memory tensors BEFORE DataLoader forks workers
++        import os
++        if os.path.exists('/dev/shm/images.npy'):
++            self._init_fast_cache()
++
+         # Initialize streaming encoder for resumed recording
+         if streaming_encoding and len(self.meta.video_keys) > 0:
+             self._streaming_encoder = StreamingVideoEncoder(
+@@ -1079,38 +1084,102 @@
+     def __len__(self):
+         return self.num_frames
+ 
++    def _init_fast_cache(self):
++        """Load numpy arrays and pre-convert to shared-memory tensors once.
++        Safe to call multiple times — only runs on first invocation.
++        When DataLoader forks workers, they inherit these via copy-on-write."""
++        import numpy as np
++        if hasattr(self, '_np_cache'):
++            return
++        self._np_cache = {
++            'indices':         np.load('/dev/shm/indices.npy'),
++            'episode_indices': np.load('/dev/shm/episode_indices.npy'),
++            'frame_indices':   np.load('/dev/shm/frame_indices.npy'),
++            'timestamps':      np.load('/dev/shm/timestamps.npy'),
++            'task_indices':    np.load('/dev/shm/task_indices.npy'),
++        }
++        # Pre-convert to tensors in shared memory so forked workers get zero-copy access
++        imgs = np.load('/dev/shm/images.npy')  # (N, 240, 320, 3) uint8
++        self._images_tensor = torch.from_numpy(
++            imgs.transpose(0, 3, 1, 2).astype(np.float32) / 255.0
++        ).share_memory_()
++        self._actions_tensor = torch.from_numpy(
++            np.load('/dev/shm/actions.npy').copy()
++        ).share_memory_()
++        self._states_tensor = torch.from_numpy(
++            np.load('/dev/shm/states.npy').copy()
++        ).share_memory_()
++        del imgs
++
+     def __getitem__(self, idx) -> dict:
+-        # Ensure dataset is loaded when we actually need to read from it
+-        self._ensure_hf_dataset_loaded()
+-        item = self.hf_dataset[idx]
+-        ep_idx = item["episode_index"].item()
+-        # Use the absolute index from the dataset for delta timestamp calculations
+-        abs_idx = item["index"].item()
++        import torch, numpy as np
++        if not hasattr(self, '_np_cache'):
++            self._init_fast_cache()
++        c = self._np_cache
++
++        # Fast tensor indexing — no copies, no decode
++        item = {
++            'observation.images.realsense': self._images_tensor[idx],
++            'observation.state': self._states_tensor[idx],
++            'action': self._actions_tensor[idx],
++            'index': torch.tensor(c['indices'][idx], dtype=torch.long),
++            'episode_index': torch.tensor(c['episode_indices'][idx], dtype=torch.long),
++            'frame_index': torch.tensor(c['frame_indices'][idx], dtype=torch.long),
++            'timestamp': torch.tensor(c['timestamps'][idx], dtype=torch.float32),
++            'task_index': torch.tensor(c['task_indices'][idx], dtype=torch.long),
++            'task': self.meta.tasks.iloc[int(c['task_indices'][idx])].name,
++        }
++        ep_idx = int(c['episode_indices'][idx])
++        abs_idx = int(c['indices'][idx])
+ 
+-        query_indices = None
++        # Handle delta_indices (action chunking) entirely from numpy cache — NO hf_dataset access
+         if self.delta_indices is not None:
+-            query_indices, padding = self._get_query_indices(abs_idx, ep_idx)
+-            query_result = self._query_hf_dataset(query_indices)
+-            item = {**item, **padding}
+-            for key, val in query_result.items():
+-                item[key] = val
+-
+-        if len(self.meta.video_keys) > 0:
+-            current_ts = item["timestamp"].item()
+-            query_timestamps = self._get_query_timestamps(current_ts, query_indices)
+-            video_frames = self._query_videos(query_timestamps, ep_idx)
+-            item = {**video_frames, **item}
++            ep = self.meta.episodes[ep_idx]
++            ep_start = ep["dataset_from_index"]
++            ep_end = ep["dataset_to_index"]
++            for key, delta_idx in self.delta_indices.items():
++                q_indices = [max(ep_start, min(ep_end - 1, abs_idx + d)) for d in delta_idx]
++                is_pad = torch.BoolTensor(
++                    [(abs_idx + d < ep_start) | (abs_idx + d >= ep_end) for d in delta_idx]
++                )
++                item[f"{key}_is_pad"] = is_pad
++                if key == "action":
++                    item[key] = self._actions_tensor[q_indices]
++                elif key == "observation.state":
++                    item[key] = self._states_tensor[q_indices]
++                elif key == "observation.images.realsense":
++                    item[key] = self._images_tensor[q_indices]
++                else:
++                    # Fallback for any other key — still use numpy cache if available
++                    cache_key_map = {
++                        'timestamp': 'timestamps',
++                        'frame_index': 'frame_indices',
++                        'episode_index': 'episode_indices',
++                        'index': 'indices',
++                        'task_index': 'task_indices',
++                    }
++                    if key in cache_key_map:
++                        vals = c[cache_key_map[key]][q_indices]
++                        item[key] = torch.from_numpy(vals.copy())
++                    else:
++                        # Last resort: use hf_dataset (should not happen for ACT)
++                        relative_indices = (
++                            q_indices if self._absolute_to_relative_idx is None
++                            else [self._absolute_to_relative_idx[i] for i in q_indices]
++                        )
++                        try:
++                            item[key] = torch.stack(self.hf_dataset[key][relative_indices])
++                        except (KeyError, TypeError, IndexError):
++                            item[key] = torch.stack(self.hf_dataset[relative_indices][key])
+ 
+         if self.image_transforms is not None:
+             image_keys = self.meta.camera_keys
+             for cam in image_keys:
+                 item[cam] = self.image_transforms(item[cam])
+ 
+-        # Add task as a string
+-        task_idx = item["task_index"].item()
++        task_idx = item["task_index"].item() if item["task_index"].dim() == 0 else int(c['task_indices'][idx])
+         item["task"] = self.meta.tasks.iloc[task_idx].name
+ 
+-        # add subtask information if available
+         if "subtask_index" in self.features and self.meta.subtasks is not None:
+             subtask_idx = item["subtask_index"].item()
+             item["subtask"] = self.meta.subtasks.iloc[subtask_idx].name

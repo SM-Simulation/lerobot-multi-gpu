@@ -1,0 +1,27 @@
+--- lerobot/scripts/lerobot_train.py	2026-02-27 18:07:18.000000000 +0000
++++ lerobot/scripts/lerobot_train.py	2026-04-03 07:43:02.578121845 +0000
+@@ -176,7 +176,7 @@
+     if accelerator is None:
+         from accelerate.utils import DistributedDataParallelKwargs
+ 
+-        ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
++        ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=False)
+         # Accelerate auto-detects the device based on the available hardware and ignores the policy.device setting.
+         # Force the device to be CPU when policy.device is set to CPU.
+         force_cpu = cfg.policy.device == "cpu"
+@@ -360,9 +360,14 @@
+         sampler=sampler,
+         pin_memory=device.type == "cuda",
+         drop_last=False,
+-        prefetch_factor=2 if cfg.num_workers > 0 else None,
++        prefetch_factor=4 if cfg.num_workers > 0 else None,
++        persistent_workers=cfg.num_workers > 0,
+     )
+ 
++    # Compile the policy for faster forward/backward
++    if device.type == "cuda":
++        policy = torch.compile(policy)
++
+     # Prepare everything with accelerator
+     accelerator.wait_for_everyone()
+     policy, optimizer, dataloader, lr_scheduler = accelerator.prepare(
