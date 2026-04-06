@@ -91,21 +91,21 @@ def extract_dataset(dataset_root: Path, output_dir: Path) -> None:
         col = table.column(image_key)
         sample = col[0].as_py()
 
-        if isinstance(sample, dict) and "path" in sample:
+        if isinstance(sample, dict) and "bytes" in sample and sample["bytes"]:
+            # Image stored as inline bytes (most common for lerobot image datasets)
+            import io
+            images = np.zeros((n, h, w, c), dtype=np.uint8)
+            for i in tqdm(range(n), desc=f"  Loading {image_key}"):
+                entry = col[i].as_py()
+                img = np.array(Image.open(io.BytesIO(entry["bytes"])))
+                images[i] = img[:h, :w, :c]
+        elif isinstance(sample, dict) and "path" in sample:
             # Image stored as file reference
             images = np.zeros((n, h, w, c), dtype=np.uint8)
             for i in tqdm(range(n), desc=f"  Loading {image_key}"):
                 entry = col[i].as_py()
                 img_path = dataset_root / entry["path"]
                 img = np.array(Image.open(img_path))
-                images[i] = img[:h, :w, :c]
-        elif isinstance(sample, dict) and "bytes" in sample:
-            # Image stored as inline bytes
-            import io
-            images = np.zeros((n, h, w, c), dtype=np.uint8)
-            for i in tqdm(range(n), desc=f"  Loading {image_key}"):
-                entry = col[i].as_py()
-                img = np.array(Image.open(io.BytesIO(entry["bytes"])))
                 images[i] = img[:h, :w, :c]
         else:
             raise ValueError(f"Unknown image format for {image_key}: {type(sample)}")
