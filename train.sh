@@ -19,6 +19,7 @@ SAVE_FREQ=5000
 LOG_FREQ=100
 CHUNK_SIZE=100
 N_ACTION_STEPS=50
+N_OBS_STEPS=1
 SEED=42
 EXTRA_ARGS=""
 
@@ -35,6 +36,7 @@ while [[ $# -gt 0 ]]; do
         --log-freq) LOG_FREQ="$2"; shift 2;;
         --chunk-size) CHUNK_SIZE="$2"; shift 2;;
         --n-action-steps) N_ACTION_STEPS="$2"; shift 2;;
+        --n-obs-steps) N_OBS_STEPS="$2"; shift 2;;
         --seed) SEED="$2"; shift 2;;
         *) EXTRA_ARGS="$EXTRA_ARGS $1"; shift;;
     esac
@@ -52,6 +54,7 @@ if [ -z "$DATASET_ROOT" ]; then
     echo "  --steps N              Training steps (default: 10000)"
     echo "  --chunk-size N         ACT chunk size (default: 100)"
     echo "  --n-action-steps N     Action steps (default: 50)"
+    echo "  --n-obs-steps N        Observation horizon (default: 1)"
     echo "  --save-freq N          Checkpoint frequency (default: 5000)"
     echo "  --seed N               Random seed (default: 42)"
     exit 1
@@ -78,6 +81,7 @@ echo "  Workers:        $NUM_WORKERS"
 echo "  Steps:          $STEPS"
 echo "  Chunk size:     $CHUNK_SIZE"
 echo "  Action steps:   $N_ACTION_STEPS"
+echo "  Obs steps:      $N_OBS_STEPS"
 echo "  Dataset:        $DATASET_ROOT"
 echo ""
 
@@ -92,6 +96,7 @@ accelerate launch \
     --dataset.image_transforms.enable=false \
     --policy.chunk_size=$CHUNK_SIZE \
     --policy.n_action_steps=$N_ACTION_STEPS \
+    --policy.n_obs_steps=$N_OBS_STEPS \
     --policy.push_to_hub=false \
     --batch_size=$BATCH_SIZE \
     --num_workers=$NUM_WORKERS \

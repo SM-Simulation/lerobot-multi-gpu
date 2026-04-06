@@ -1,0 +1,102 @@
+--- lerobot/policies/act/modeling_act.py	2026-02-27 18:07:18.000000000 +0000
++++ lerobot/policies/act/modeling_act.py	2026-04-06 00:00:00.000000000 +0000
+@@ -313,7 +313,7 @@
+             # dimension.
+             num_input_token_encoder = 1 + config.chunk_size
+             if self.config.robot_state_feature:
+-                num_input_token_encoder += 1
++                num_input_token_encoder += config.n_obs_steps
+             self.register_buffer(
+                 "vae_encoder_pos_enc",
+                 create_sinusoidal_pos_embedding(num_input_token_encoder, config.dim_model).unsqueeze(0),
+@@ -353,7 +353,7 @@
+         # Transformer encoder positional embeddings.
+         n_1d_tokens = 1  # for the latent
+         if self.config.robot_state_feature:
+-            n_1d_tokens += 1
++            n_1d_tokens += config.n_obs_steps
+         if self.config.env_state_feature:
+             n_1d_tokens += 1
+         self.encoder_1d_feature_pos_embed = nn.Embedding(n_1d_tokens, config.dim_model)
+@@ -408,8 +408,12 @@
+                 self.vae_encoder_cls_embed.weight, "1 d -> b 1 d", b=batch_size
+             )  # (B, 1, D)
+             if self.config.robot_state_feature:
+-                robot_state_embed = self.vae_encoder_robot_state_input_proj(batch[OBS_STATE])
+-                robot_state_embed = robot_state_embed.unsqueeze(1)  # (B, 1, D)
++                robot_state = batch[OBS_STATE]
++                if robot_state.dim() == 3:  # (B, n_obs, state_dim)
++                    robot_state_embed = self.vae_encoder_robot_state_input_proj(robot_state)  # (B, n_obs, D)
++                else:
++                    robot_state_embed = self.vae_encoder_robot_state_input_proj(robot_state)
++                    robot_state_embed = robot_state_embed.unsqueeze(1)  # (B, 1, D)
+             action_embed = self.vae_encoder_action_input_proj(batch[ACTION])  # (B, S, D)
+ 
+             if self.config.robot_state_feature:
+@@ -425,8 +429,9 @@
+             # Prepare key padding mask for the transformer encoder. We have 1 or 2 extra tokens at the start of the
+             # sequence depending whether we use the input states or not (cls and robot state)
+             # False means not a padding token.
++            n_prefix = 1 + (self.config.n_obs_steps if self.config.robot_state_feature else 0)
+             cls_joint_is_pad = torch.full(
+-                (batch_size, 2 if self.config.robot_state_feature else 1),
++                (batch_size, n_prefix),
+                 False,
+                 device=batch[OBS_STATE].device,
+             )
+@@ -458,30 +463,38 @@
+         # Prepare transformer encoder inputs.
+         encoder_in_tokens = [self.encoder_latent_input_proj(latent_sample)]
+         encoder_in_pos_embed = list(self.encoder_1d_feature_pos_embed.weight.unsqueeze(1))
+-        # Robot state token.
++        # Robot state token(s) — one per observation timestep.
+         if self.config.robot_state_feature:
+-            encoder_in_tokens.append(self.encoder_robot_state_input_proj(batch[OBS_STATE]))
++            obs_state = batch[OBS_STATE]
++            if obs_state.dim() == 3:  # (B, n_obs, state_dim)
++                for t in range(obs_state.shape[1]):
++                    encoder_in_tokens.append(self.encoder_robot_state_input_proj(obs_state[:, t]))
++            else:
++                encoder_in_tokens.append(self.encoder_robot_state_input_proj(obs_state))
+         # Environment state token.
+         if self.config.env_state_feature:
+             encoder_in_tokens.append(self.encoder_env_state_input_proj(batch[OBS_ENV_STATE]))
+ 
+         if self.config.image_features:
+-            # For a list of images, the H and W may vary but H*W is constant.
+-            # NOTE: If modifying this section, verify on MPS devices that
+-            # gradients remain stable (no explosions or NaNs).
+             for img in batch[OBS_IMAGES]:
+-                cam_features = self.backbone(img)["feature_map"]
+-                cam_pos_embed = self.encoder_cam_feat_pos_embed(cam_features).to(dtype=cam_features.dtype)
+-                cam_features = self.encoder_img_feat_input_proj(cam_features)
+-
+-                # Rearrange features to (sequence, batch, dim).
+-                cam_features = einops.rearrange(cam_features, "b c h w -> (h w) b c")
+-                cam_pos_embed = einops.rearrange(cam_pos_embed, "b c h w -> (h w) b c")
+-
+-                # Extend immediately instead of accumulating and concatenating
+-                # Convert to list to extend properly
+-                encoder_in_tokens.extend(list(cam_features))
+-                encoder_in_pos_embed.extend(list(cam_pos_embed))
++                if img.dim() == 5:  # (B, n_obs, C, H, W) — multiple observation steps
++                    B_img, T_img = img.shape[0], img.shape[1]
++                    img_flat = img.reshape(B_img * T_img, *img.shape[2:])
++                    cam_features = self.backbone(img_flat)["feature_map"]
++                    cam_pos_embed = self.encoder_cam_feat_pos_embed(cam_features).to(dtype=cam_features.dtype)
++                    cam_features = self.encoder_img_feat_input_proj(cam_features)
++                    cam_features = einops.rearrange(cam_features, "(b t) c h w -> (t h w) b c", b=B_img, t=T_img)
++                    cam_pos_embed = einops.rearrange(cam_pos_embed, "(b t) c h w -> (t h w) b c", b=B_img, t=T_img)
++                    encoder_in_tokens.extend(list(cam_features))
++                    encoder_in_pos_embed.extend(list(cam_pos_embed))
++                else:  # (B, C, H, W) — single observation step
++                    cam_features = self.backbone(img)["feature_map"]
++                    cam_pos_embed = self.encoder_cam_feat_pos_embed(cam_features).to(dtype=cam_features.dtype)
++                    cam_features = self.encoder_img_feat_input_proj(cam_features)
++                    cam_features = einops.rearrange(cam_features, "b c h w -> (h w) b c")
++                    cam_pos_embed = einops.rearrange(cam_pos_embed, "b c h w -> (h w) b c")
++                    encoder_in_tokens.extend(list(cam_features))
++                    encoder_in_pos_embed.extend(list(cam_pos_embed))
+ 
+         # Stack all tokens along the sequence dimension.
+         encoder_in_tokens = torch.stack(encoder_in_tokens, axis=0)

@@ -27,7 +27,8 @@ if [ "${1:-}" = "--revert" ]; then
     echo "Reverting patches..."
     for f in "$LEROBOT_DIR/datasets/lerobot_dataset.py" \
              "$LEROBOT_DIR/scripts/lerobot_train.py" \
-             "$LEROBOT_DIR/policies/act/modeling_act.py"; do
+             "$LEROBOT_DIR/policies/act/modeling_act.py" \
+             "$LEROBOT_DIR/policies/act/configuration_act.py"; do
         if [ -f "${f}.orig" ]; then
             cp "${f}.orig" "$f"
             rm "${f}.orig"
@@ -44,7 +45,8 @@ echo "  Site packages: $SITE_PACKAGES"
 # Backup originals
 for f in "$LEROBOT_DIR/datasets/lerobot_dataset.py" \
          "$LEROBOT_DIR/scripts/lerobot_train.py" \
-         "$LEROBOT_DIR/policies/act/modeling_act.py"; do
+         "$LEROBOT_DIR/policies/act/modeling_act.py" \
+         "$LEROBOT_DIR/policies/act/configuration_act.py"; do
     if [ ! -f "${f}.orig" ]; then
         cp "$f" "${f}.orig"
     fi

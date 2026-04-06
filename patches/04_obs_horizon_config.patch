@@ -1,0 +1,27 @@
+--- lerobot/policies/act/configuration_act.py	2026-02-27 18:07:18.000000000 +0000
++++ lerobot/policies/act/configuration_act.py	2026-04-06 00:00:00.000000000 +0000
+@@ -146,9 +146,9 @@
+                 f"The chunk size is the upper bound for the number of action steps per model invocation. Got "
+                 f"{self.n_action_steps} for `n_action_steps` and {self.chunk_size} for `chunk_size`."
+             )
+-        if self.n_obs_steps != 1:
++        if self.n_obs_steps < 1:
+             raise ValueError(
+-                f"Multiple observation steps not handled yet. Got `nobs_steps={self.n_obs_steps}`"
++                f"`n_obs_steps` must be >= 1. Got `n_obs_steps={self.n_obs_steps}`"
+             )
+ 
+     def get_optimizer_preset(self) -> AdamWConfig:
+@@ -165,8 +165,10 @@
+             raise ValueError("You must provide at least one image or the environment state among the inputs.")
+ 
+     @property
+-    def observation_delta_indices(self) -> None:
+-        return None
++    def observation_delta_indices(self) -> list | None:
++        if self.n_obs_steps <= 1:
++            return None
++        return list(range(-(self.n_obs_steps - 1), 1))
+ 
+     @property
+     def action_delta_indices(self) -> list:
