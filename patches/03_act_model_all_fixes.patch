@@ -1,5 +1,5 @@
---- lerobot/policies/act/modeling_act.py	2026-02-27 18:07:18.000000000 +0000
-+++ lerobot/policies/act/modeling_act.py	2026-04-06 00:00:00.000000000 +0000
+--- lerobot/policies/act/modeling_act.py.orig	2026-04-07 00:02:15.319151707 +0000
++++ lerobot/policies/act/modeling_act.py	2026-04-07 03:50:37.934349650 +0000
 @@ -313,7 +313,7 @@
              # dimension.
              num_input_token_encoder = 1 + config.chunk_size
@@ -18,7 +18,15 @@
          if self.config.env_state_feature:
              n_1d_tokens += 1
          self.encoder_1d_feature_pos_embed = nn.Embedding(n_1d_tokens, config.dim_model)
-@@ -408,8 +408,12 @@
+@@ -375,6 +375,7 @@
+             if p.dim() > 1:
+                 nn.init.xavier_uniform_(p)
+ 
++    @torch.compiler.disable
+     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, tuple[Tensor, Tensor] | tuple[None, None]]:
+         """A forward pass through the Action Chunking Transformer (with optional VAE encoder).
+ 
+@@ -408,8 +409,12 @@
                  self.vae_encoder_cls_embed.weight, "1 d -> b 1 d", b=batch_size
              )  # (B, 1, D)
              if self.config.robot_state_feature:
@@ -33,7 +41,7 @@
              action_embed = self.vae_encoder_action_input_proj(batch[ACTION])  # (B, S, D)
  
              if self.config.robot_state_feature:
-@@ -425,8 +429,9 @@
+@@ -425,8 +430,9 @@
              # Prepare key padding mask for the transformer encoder. We have 1 or 2 extra tokens at the start of the
              # sequence depending whether we use the input states or not (cls and robot state)
              # False means not a padding token.
@@ -44,7 +52,7 @@
                  False,
                  device=batch[OBS_STATE].device,
              )
-@@ -458,30 +463,38 @@
+@@ -458,32 +464,49 @@
          # Prepare transformer encoder inputs.
          encoder_in_tokens = [self.encoder_latent_input_proj(latent_sample)]
          encoder_in_pos_embed = list(self.encoder_1d_feature_pos_embed.weight.unsqueeze(1))
@@ -84,6 +92,8 @@
 +                    img_flat = img.reshape(B_img * T_img, *img.shape[2:])
 +                    cam_features = self.backbone(img_flat)["feature_map"]
 +                    cam_pos_embed = self.encoder_cam_feat_pos_embed(cam_features).to(dtype=cam_features.dtype)
++                    # pos_embed is (1, C, H, W) — expand to match (B*T, C, H, W)
++                    cam_pos_embed = cam_pos_embed.expand(cam_features.shape[0], -1, -1, -1)
 +                    cam_features = self.encoder_img_feat_input_proj(cam_features)
 +                    cam_features = einops.rearrange(cam_features, "(b t) c h w -> (t h w) b c", b=B_img, t=T_img)
 +                    cam_pos_embed = einops.rearrange(cam_pos_embed, "(b t) c h w -> (t h w) b c", b=B_img, t=T_img)
@@ -99,4 +109,13 @@
 +                    encoder_in_pos_embed.extend(list(cam_pos_embed))
  
          # Stack all tokens along the sequence dimension.
++        # Ensure all pos embeds have the same batch dim (1D embeds may be (1, dim))
++        max_batch = max(t.shape[0] for t in encoder_in_pos_embed)
++        if max_batch > 1:
++            encoder_in_pos_embed = [
++                e.expand(max_batch, -1) if e.shape[0] == 1 else e
++                for e in encoder_in_pos_embed
++            ]
          encoder_in_tokens = torch.stack(encoder_in_tokens, axis=0)
+         encoder_in_pos_embed = torch.stack(encoder_in_pos_embed, axis=0)
+ 
